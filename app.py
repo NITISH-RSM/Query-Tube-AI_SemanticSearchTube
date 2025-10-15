@@ -4,7 +4,7 @@ import numpy as np
 import time
 import os
 
-# Safe imports (same logic)
+# Safe imports
 try:
     from sentence_transformers import SentenceTransformer
     from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
@@ -50,6 +50,7 @@ st.markdown("""
     }
     @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
     .stTextInput input { background-color: #121826; border: 1px solid #2A3B4B; color: #E0E0E0; }
+    .status-bar { background: #121826; padding: 1rem; border-radius: 8px; margin: 1rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -62,38 +63,117 @@ if "df" not in st.session_state:
     st.session_state.df = None
 if "model" not in st.session_state:
     st.session_state.model = None
+if "embeddings" not in st.session_state:
+    st.session_state.embeddings = None
+if "metric" not in st.session_state:
+    st.session_state.metric = "cosine"
 
-# Load data and model (same logic as Gradio)
+# Auto-initialization function
 @st.cache_resource
 def load_system():
+    """Auto-load system on startup"""
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
     try:
-        df = pd.read_parquet("video_index_with_embeddings.parquet")
+        progress_bar.progress(10)
+        status_text.text("🔍 Loading video index...")
         
-        # Best model logic
+        # Load data
+        if not os.path.exists("video_index_with_embeddings.parquet"):
+            raise FileNotFoundError("video_index_with_embeddings.parquet not found")
+        
+        df = pd.read_parquet("video_index_with_embeddings.parquet")
+        progress_bar.progress(30)
+        
+        # Best model logic (same as Gradio)
+        status_text.text("🎯 Selecting best model...")
         try:
             results_df = pd.read_csv("model_evaluation_summary.csv")
             if results_df["avg_rank"].notna().any():
                 best_row = results_df.loc[results_df["avg_rank"].idxmin()]
                 best_model_name = best_row["model"]
                 best_metric = best_row.get("metric", "cosine")
+                print(f"Using best model: {best_model_name}")
             else:
-                best_model_name = "paraphrase-mpnet-base-v2"
+                best_model_name = "all-MiniLM-L6-v2"  # Smaller for faster load
                 best_metric = "cosine"
-        except:
-            best_model_name = "paraphrase-mpnet-base-v2"
+        except FileNotFoundError:
+            best_model_name = "all-MiniLM-L6-v2"
             best_metric = "cosine"
         
+        progress_bar.progress(50)
+        status_text.text(f"🤖 Loading model: {best_model_name}...")
+        
+        # Load model
         model = SentenceTransformer(best_model_name)
         
+        # Prepare embeddings
         embedding_columns = [col for col in df.columns if col.startswith("emb_")]
+        if not embedding_columns:
+            raise ValueError("No embedding columns found")
+        
         combined_embeddings = df[embedding_columns].values
         df["thumbnail"] = df["video_id"].apply(lambda x: f"https://i.ytimg.com/vi/{x}/hqdefault.jpg")
         df["channel"] = "WatchMojo"
         
-        return model, combined_embeddings, df, best_metric
+        progress_bar.progress(90)
+        status_text.text("✅ System ready!")
+        
+        # Store in session
+        st.session_state.model = model
+        st.session_state.embeddings = combined_embeddings
+        st.session_state.df = df
+        st.session_state.metric = best_metric
+        st.session_state.system_ready = True
+        
+        progress_bar.progress(100)
+        time.sleep(0.5)  # Show completion
+        progress_bar.empty()
+        status_text.empty()
+        
+        return True
+        
     except Exception as e:
-        st.error(f"System load failed: {e}")
-        return None, None, None, None
+        st.error(f"❌ Auto-init failed: {str(e)}")
+        st.info("Required files: video_index_with_embeddings.parquet")
+        progress_bar.empty()
+        status_text.empty()
+        return False
+
+# AUTO-INITIALIZE ON STARTUP
+if not st.session_state.system_ready:
+    st.markdown("""
+    <div class='status-bar'>
+        <h3 style='color: #E0E0E0; margin: 0;'>🚀 Initializing QueryTube...</h3>
+        <p style='color: #A0AEC0;'>Loading AI model and video index automatically</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    load_system()
+    st.rerun()
+
+# Header (Gradio-style)
+st.markdown("""
+<div class='header'>
+    <div class='logo'>🎥 QueryTube</div>
+    <input class='search-header' type='text' placeholder='Search videos...'>
+    <div class='user-menu'>
+        <span>🔔</span>
+        <div style='width: 32px; height: 32px; background: #3B82F6; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white;'>U</div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+# System status indicator
+st.markdown(f"""
+<div class='status-bar'>
+    <span style='color: #10B981;'>✅ Ready</span> | 
+    Model: {st.session_state.model[0].__class__.__name__} | 
+    Videos: {len(st.session_state.df):,} | 
+    <span style='color: #3B82F6;'>{st.session_state.metric.upper()} Metric</span>
+</div>
+""", unsafe_allow_html=True)
 
 def query_to_top5_videos(query, top_k=5, metric="cosine"):
     """Same exact logic from Gradio code"""
@@ -127,7 +207,8 @@ def query_to_top5_videos(query, top_k=5, metric="cosine"):
             "channel": df.iloc[top_k_indices]["channel"].values
         })
         return result_df
-    except:
+    except Exception as e:
+        st.error(f"Search error: {e}")
         return pd.DataFrame()
 
 def format_result_card(video):
@@ -136,7 +217,7 @@ def format_result_card(video):
     return f"""
     <div class='result_card'>
         <iframe src='{embed_url}' allowfullscreen></iframe>
-        <div class='card-content'>
+        <div style='padding: 1rem;'>
             <h3 class='title'>{video["title"]}</h3>
             <p class='channel'><strong>Channel:</strong> {video["channel"]}</p>
             <p class='channel'><strong>Relevance Score:</strong> {video["score"]:.3f}</p>
@@ -145,39 +226,12 @@ def format_result_card(video):
     </div>
     """
 
-# Header (Gradio-style)
-st.markdown("""
-<div class='header'>
-    <div class='logo'>🎥 QueryTube</div>
-    <input class='search-header' type='text' placeholder='Search videos...'>
-    <div class='user-menu'>
-        <span>🔔</span>
-        <div style='width: 32px; height: 32px; background: #3B82F6; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white;'>U</div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-# Initialize system
-if not st.session_state.system_ready:
-    if st.button("🚀 Initialize System"):
-        with st.spinner("Loading model and data..."):
-            model, embeddings, df, metric = load_system()
-            if model:
-                st.session_state.model = model
-                st.session_state.embeddings = embeddings
-                st.session_state.df = df
-                st.session_state.metric = metric
-                st.session_state.system_ready = True
-                st.success("✅ System ready!")
-                st.rerun()
-    st.stop()
-
 # Sidebar Navigation (Gradio-style)
 with st.sidebar:
     st.markdown('<div class="sidebar">', unsafe_allow_html=True)
     st.markdown("<h3 style='color: #E0E0E0;'>Navigation</h3>", unsafe_allow_html=True)
     
-    if st.button("🔍 Search", key="nav_search", help="Primary search page"):
+    if st.button("🔍 Search", key="nav_search"):
         st.session_state.page = "search"
         st.rerun()
     if st.button("📜 History", key="nav_history"):
@@ -201,49 +255,56 @@ with st.sidebar:
 
 # Page Content
 if st.session_state.page == "search":
-    # Search Page (Gradio-style)
+    # Search Page
     st.markdown("<h2 style='color: #E0E0E0;'>Search Videos</h2>", unsafe_allow_html=True)
     
     col1, col2 = st.columns([5, 1])
     with col1:
         query = st.text_input("", placeholder="Semantic search for YouTube videos", key="search_query")
     with col2:
-        search_btn = st.button("Search", type="primary")
+        if st.button("Search", type="primary"):
+            if query:
+                # Loading skeleton
+                skeleton_cols = st.columns(5)
+                for col in skeleton_cols:
+                    with col:
+                        st.markdown('<div class="skeleton"></div>', unsafe_allow_html=True)
+                
+                with st.spinner("Searching..."):
+                    time.sleep(1.5)
+                    results = query_to_top5_videos(query, metric=st.session_state.metric)
+                
+                # Clear skeletons
+                for col in st.columns(5):
+                    with col:
+                        st.empty()
+                
+                if not results.empty:
+                    st.success(f"✅ Found {len(results)} results!")
+                    result_cols = st.columns(5)
+                    for i, (_, video) in enumerate(results.iterrows()):
+                        with result_cols[i % 5]:
+                            st.markdown(format_result_card(video), unsafe_allow_html=True)
+                            
+                    # Download results
+                    csv = results.to_csv(index=False)
+                    st.download_button("💾 Download Results", csv, "search_results.csv", "text/csv")
+                else:
+                    st.markdown("""
+                    <div style='text-align: center; padding: 3rem; color: #A0AEC0;'>
+                        😔 No videos found. Try another search!
+                    </div>
+                    """, unsafe_allow_html=True)
     
-    # Sort buttons
+    # Sort buttons (placeholder)
     st.markdown("<strong>Sort by:</strong>", unsafe_allow_html=True)
     col_sort1, col_sort2, col_sort3, col_sort4 = st.columns(4)
     with col_sort1: st.button("Relevance", disabled=True)
     with col_sort2: st.button("Date", disabled=True)
     with col_sort3: st.button("Duration", disabled=True)
     with col_sort4: st.button("Views", disabled=True)
-    
-    if search_btn and query:
-        # Loading skeleton
-        skeleton_cols = st.columns(5)
-        for col in skeleton_cols:
-            with col:
-                st.markdown('<div class="skeleton"></div>', unsafe_allow_html=True)
-        
-        with st.spinner("Searching..."):
-            time.sleep(1.5)  # Same delay as Gradio
-            results = query_to_top5_videos(query, metric=st.session_state.metric)
-        
-        if not results.empty:
-            st.success(f"Found {len(results)} results!")
-            result_cols = st.columns(5)
-            for i, (_, video) in enumerate(results.iterrows()):
-                with result_cols[i % 5]:
-                    st.markdown(format_result_card(video), unsafe_allow_html=True)
-        else:
-            st.markdown("""
-            <div style='text-align: center; padding: 3rem; color: #A0AEC0;'>
-                😔 No videos found. Try another search!
-            </div>
-            """, unsafe_allow_html=True)
 
 elif st.session_state.page == "history":
-    # History Page (Gradio-style)
     st.markdown("<h2 style='color: #E0E0E0;'>Search History</h2>", unsafe_allow_html=True)
     st.markdown("""
     <div style='background: #121826; border: 1px solid #2A3B4B; border-radius: 8px; padding: 1rem; margin: 1rem 0;'>
@@ -262,7 +323,6 @@ elif st.session_state.page == "history":
     """, unsafe_allow_html=True)
 
 elif st.session_state.page == "settings":
-    # Settings Page (Gradio-style)
     st.markdown("<h2 style='color: #E0E0E0;'>Settings</h2>", unsafe_allow_html=True)
     
     st.markdown("<h4 style='color: #E0E0E0;'>Data Sources</h4>", unsafe_allow_html=True)
@@ -272,14 +332,11 @@ elif st.session_state.page == "settings":
         <div style='background: #2A3B4B; color: #E0E0E0; padding: 0.5rem 1rem; border-radius: 20px; display: flex; align-items: center; gap: 0.5rem;'>
             WatchMojo <span style='cursor: pointer; color: #EF4444;'>&times;</span>
         </div>
-        <div style='background: #2A3B4B; color: #E0E0E0; padding: 0.5rem 1rem; border-radius: 20px; display: flex; align-items: center; gap: 0.5rem;'>
-            Science & Technology <span style='cursor: pointer; color: #EF4444;'>&times;</span>
-        </div>
     </div>
     """, unsafe_allow_html=True)
     
     st.markdown("<h4 style='color: #E0E0E0;'>Semantic Search</h4>", unsafe_allow_html=True)
-    sensitivity = st.slider("Search Sensitivity", 0.0, 1.0, 0.5, 0.1)
+    st.slider("Search Sensitivity", 0.0, 1.0, 0.5, 0.1)
     
     col1, col2 = st.columns(2)
     with col1: st.checkbox("Dark Mode", value=True)
