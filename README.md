@@ -31,13 +31,6 @@
    ```bash
    git clone https://github.com/NitishKumar2211/QueryTube-Semantic-Search.git
    cd QueryTube-Semantic-Search
-
-### Installation
-
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/manasa-kyatham/QueryTube-Semantic-Search.git
-    cd QueryTube-Semantic-Search
     ```
 
 2.  **Create and activate a virtual environment:**
