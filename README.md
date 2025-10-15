@@ -1,10 +1,7 @@
 # QueryTube: A Semantic Search Engine 🎥
 
-**[➡️ Live Demo on Hugging Face Spaces](https://query-tube-nitish-main.streamlit.app/)**
+**[➡️ Live Demo on Streamit Cloud](https://query-tube-nitish-main.streamlit.app/)**
 
-<img src="https://github.com/user-attachments/assets/6e1a8d21-e44e-40eb-8a5a-4ffa6e71aded" alt="Project Screenshot" width="800"/>
-
-</div>
 
 ---
 ## ✨ Features
