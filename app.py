@@ -1,347 +1,321 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import sys
 import os
 import time
 from pathlib import Path
 
-# Try importing ML libraries with error handling
+# Safe imports
 try:
     from sentence_transformers import SentenceTransformer
-    from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
+    from sklearn.metrics.pairwise import cosine_similarity
     ML_AVAILABLE = True
-    print("✅ ML libraries imported successfully")
-except ImportError as e:
-    st.error(f"❌ ML libraries import failed: {e}")
-    st.info("Install with: `pip install sentence-transformers scikit-learn torch`")
+except ImportError:
     ML_AVAILABLE = False
+    st.error("Install: pip install sentence-transformers scikit-learn")
 
-# Page configuration
-st.set_page_config(
-    page_title="QueryTube",
-    page_icon="🎥",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="QueryTube", layout="wide")
 
-# Custom CSS (fixed indentation)
+# Fixed CSS for video embeds
 st.markdown("""
 <style>
-    .main { 
-        background-color: #0B0F19; 
-        color: #E0E0E0; 
+    .video-container {
+        background-color: #121826;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 1rem 0;
+        border: 1px solid #2A3B4B;
     }
-    .stApp { 
-        background-color: #0B0F19; 
+    .video-title {
+        color: #E0E0E0;
+        font-size: 1.1rem;
+        margin: 0.5rem 0;
+        font-weight: 600;
+    }
+    .video-meta {
+        color: #A0AEC0;
+        font-size: 0.9rem;
+        margin: 0.25rem 0;
     }
     .stTextInput > div > div > input {
-        background-color: #121826; 
-        border: 1px solid #2A3B4B; 
-        color: #E0E0E0;
-        border-radius: 8px;
-    }
-    .stButton > button {
-        background-color: #2563EB; 
-        color: white; 
-        border-radius: 8px;
-        border: none;
-    }
-    .stButton > button:hover {
-        background-color: #1D4ED8;
-    }
-    .video-card {
-        background-color: #121826; 
-        border: 1px solid #2A3B4B;
-        border-radius: 8px; 
-        padding: 1rem; 
-        margin: 1rem 0;
-    }
-    .metric-box {
         background-color: #121826;
-        padding: 1rem;
-        border-radius: 8px;
+        color: #E0E0E0;
         border: 1px solid #2A3B4B;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Global variables
-model = None
-combined_embeddings = None
-df = None
-best_metric = "cosine"
+# Global state
+if "system_ready" not in st.session_state:
+    st.session_state.system_ready = False
+    st.session_state.df = None
+    st.session_state.model = None
+    st.session_state.embeddings = None
 
-@st.cache_resource
-def load_data_and_model():
-    """Load data and model with comprehensive error handling."""
-    global model, combined_embeddings, df, best_metric
-    
+def validate_and_load_data():
+    """Validate and load data with proper structure."""
     try:
-        # Check and load video index
+        # Check file
         if not os.path.exists("video_index_with_embeddings.parquet"):
-            st.error("❌ File 'video_index_with_embeddings.parquet' not found!")
-            st.info("Please upload this file to the project directory.")
-            st.stop()
+            st.error("❌ video_index_with_embeddings.parquet missing!")
+            return False
         
+        # Load and validate
         df = pd.read_parquet("video_index_with_embeddings.parquet")
-        st.success(f"✅ Loaded {len(df)} video records")
         
-        # Determine best model (use smaller model for cloud)
-        model_choices = {
-            "Fast (Recommended)": "all-MiniLM-L6-v2",
-            "Better Quality": "all-mpnet-base-v2",
-            "Original": "paraphrase-mpnet-base-v2"
-        }
+        required_cols = ["video_id", "title"]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            st.error(f"❌ Missing columns: {missing_cols}")
+            return False
         
-        try:
-            results_df = pd.read_csv("model_evaluation_summary.csv")
-            if not results_df["avg_rank"].isna().all():
-                best_row = results_df.loc[results_df["avg_rank"].idxmin()]
-                best_model_name = best_row["model"]
-                best_metric = best_row.get("metric", "cosine")
-                st.info(f"🎯 Using evaluated model: {best_model_name}")
-            else:
-                best_model_name = model_choices["Fast (Recommended)"]
-        except FileNotFoundError:
-            best_model_name = model_choices["Fast (Recommended)"]
-            st.warning("⚠️ Using default fast model: all-MiniLM-L6-v2")
+        # Check embeddings
+        emb_cols = [col for col in df.columns if col.startswith("emb_")]
+        if not emb_cols:
+            st.error("❌ No embedding columns (starting with 'emb_') found!")
+            return False
         
-        # Load model with timeout and memory management
-        with st.spinner(f"Loading model: {best_model_name}..."):
-            model = SentenceTransformer(best_model_name)
+        # Validate video_ids (YouTube format)
+        valid_ids = df["video_id"].str.match(r'^[a-zA-Z0-9_-]{11}$').all()
+        if not valid_ids:
+            st.warning("⚠️ Some video_ids may not be valid YouTube IDs")
         
-        st.success(f"✅ Model loaded successfully: {best_model_name}")
+        # Prepare data
+        st.session_state.df = df.copy()
+        st.session_state.embeddings = df[emb_cols].values.astype(np.float32)
         
-        # Validate and prepare embeddings
-        embedding_columns = [col for col in df.columns if col.startswith("emb_")]
-        if not embedding_columns:
-            st.error("❌ No embedding columns found in parquet file!")
-            st.stop()
+        # Add metadata
+        st.session_state.df["channel"] = "WatchMojo"  # Default
+        st.session_state.df["thumbnail"] = st.session_state.df["video_id"].apply(
+            lambda x: f"https://img.youtube.com/vi/{x}/hqdefault.jpg"
+        )
         
-        combined_embeddings = df[embedding_columns].values
-        df["thumbnail"] = df["video_id"].apply(lambda x: f"https://i.ytimg.com/vi/{x}/hqdefault.jpg")
-        df["channel"] = "WatchMojo"  # Default channel
-        
-        st.info(f"📊 Embeddings shape: {combined_embeddings.shape}")
-        return model, combined_embeddings, df, best_metric
+        st.success(f"✅ Data loaded: {len(df)} videos, {st.session_state.embeddings.shape[1]} embedding dims")
+        return True
         
     except Exception as e:
-        st.error(f"❌ Data/Model loading failed: {str(e)}")
-        st.info("""
-        **Troubleshooting:**
-        1. Check if parquet file has embedding columns (starting with 'emb_')
-        2. Try a smaller model: all-MiniLM-L6-v2
-        3. Ensure sufficient memory (at least 2GB RAM)
-        """)
-        st.stop()
-        return None, None, None, None
+        st.error(f"❌ Data loading failed: {e}")
+        return False
 
-def query_to_top5_videos(query, top_k=5, metric="cosine"):
-    """Semantic search function with error handling."""
-    global model, combined_embeddings, df
-    
-    if not query.strip() or model is None or df is None:
-        return pd.DataFrame(columns=["video_id", "title", "score", "thumbnail", "channel"])
+def load_model():
+    """Load lightweight model."""
+    try:
+        with st.spinner("Loading AI model..."):
+            # Use small, reliable model
+            model = SentenceTransformer("all-MiniLM-L6-v2")
+            st.success("✅ Model loaded successfully")
+            st.session_state.model = model
+            return True
+    except Exception as e:
+        st.error(f"❌ Model loading failed: {e}")
+        return False
+
+def initialize_system():
+    """Complete system initialization."""
+    with st.spinner("🚀 Initializing QueryTube..."):
+        if not validate_and_load_data():
+            return False
+        
+        if not ML_AVAILABLE:
+            st.error("ML libraries not available")
+            return False
+        
+        if not load_model():
+            return False
+        
+        st.session_state.system_ready = True
+        return True
+
+def search_videos(query, top_k=5):
+    """Perform semantic search."""
+    if not st.session_state.system_ready:
+        return pd.DataFrame()
     
     try:
-        st.info(f"🔍 Processing query: '{query}'")
+        model = st.session_state.model
+        embeddings = st.session_state.embeddings
+        df = st.session_state.df
         
         # Encode query
-        query_embedding_title = model.encode([query], show_progress_bar=False, convert_to_numpy=True)
-        # Handle dimension mismatch
-        if query_embedding_title.shape[1] != combined_embeddings.shape[1] // 2:
-            st.warning("⚠️ Embedding dimension mismatch, padding query embedding")
-            padding = np.zeros((1, combined_embeddings.shape[1] // 2))
-            query_embedding_title = np.hstack([query_embedding_title, padding])
+        with st.spinner("Analyzing query..."):
+            query_embedding = model.encode([query], show_progress_bar=False)
         
-        query_embedding = query_embedding_title
+        # Handle dimension mismatch
+        if query_embedding.shape[1] != embeddings.shape[1]:
+            st.warning(f"⚠️ Dimension mismatch: {query_embedding.shape[1]} vs {embeddings.shape[1]}")
+            # Pad or truncate
+            if query_embedding.shape[1] < embeddings.shape[1]:
+                padding = np.zeros((1, embeddings.shape[1] - query_embedding.shape[1]))
+                query_embedding = np.hstack([query_embedding, padding])
+            else:
+                query_embedding = query_embedding[:, :embeddings.shape[1]]
         
         # Compute similarity
-        if metric == "cosine":
-            similarities = cosine_similarity(query_embedding, combined_embeddings)[0]
-            scores = similarities
-        elif metric == "euclidean":
-            distances = euclidean_distances(query_embedding, combined_embeddings)[0]
-            scores = 1 / (1 + distances)
-        else:
-            st.error(f"Unsupported metric: {metric}")
-            return pd.DataFrame()
+        similarities = cosine_similarity(query_embedding, embeddings)[0]
         
-        # Get top-k results
-        top_k_indices = np.argsort(scores)[::-1][:min(top_k, len(scores))]
-        top_k_scores = scores[top_k_indices]
+        # Get top results
+        top_indices = np.argsort(similarities)[::-1][:top_k]
+        top_scores = similarities[top_indices]
         
-        result_df = pd.DataFrame({
-            "video_id": df.iloc[top_k_indices]["video_id"].values,
-            "title": df.iloc[top_k_indices]["title"].values,
-            "score": top_k_scores,
-            "thumbnail": df.iloc[top_k_indices]["thumbnail"].values,
-            "channel": df.iloc[top_k_indices]["channel"].values
-        })
+        results = df.iloc[top_indices].copy()
+        results["score"] = top_scores
         
-        st.success(f"✅ Found {len(result_df)} relevant videos")
-        return result_df
+        st.success(f"✅ Found {len(results)} relevant videos")
+        return results
         
     except Exception as e:
-        st.error(f"❌ Search failed: {str(e)}")
+        st.error(f"❌ Search failed: {e}")
         return pd.DataFrame()
 
-def display_video_card(video_data):
-    """Display video result as HTML card."""
+def display_video_result(video_data):
+    """Display single video with working embed."""
     video_id = video_data["video_id"]
     title = video_data["title"]
-    channel = video_data["channel"]
     score = video_data["score"]
+    channel = video_data.get("channel", "Unknown")
     
-    embed_url = f"https://www.youtube.com/embed/{video_id}?rel=0&modestbranding=1&iv_load_policy=3&autoplay=0"
+    # Test YouTube embed URL
+    embed_url = f"https://www.youtube.com/embed/{video_id}"
     
-    # Fixed HTML string (no indentation issues)
-    html_card = f"""
-    <div class="video-card">
-        <iframe 
-            width="100%" 
-            height="200" 
-            src="{embed_url}" 
-            frameborder="0" 
-            allowfullscreen>
-        </iframe>
-        <h3 style="color: #E0E0E0; margin-top: 1rem; font-size: 1.1rem;">{title}</h3>
-        <p style="color: #A0AEC0;"><strong>📺 Channel:</strong> {channel}</p>
-        <p style="color: #A0AEC0;"><strong>⭐ Relevance Score:</strong> {score:.3f}</p>
-        <p style="color: #A0AEC0; font-style: italic; font-size: 0.9rem;">
-            *Click play to watch the video preview*
+    # Create responsive video card
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        # Try iframe first
+        st.markdown(f"""
+        <div class="video-container">
+            <iframe 
+                width="100%" 
+                height="200" 
+                src="{embed_url}?rel=0&modestbranding=1" 
+                frameborder="0" 
+                allowfullscreen
+                title="{title}">
+            </iframe>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown(f"""
+        <div class="video-container" style="height: 200px; display: flex; align-items: center;">
+            <img src="https://img.youtube.com/vi/{video_id}/mqdefault.jpg" 
+                 alt="Thumbnail" 
+                 style="width: 100%; border-radius: 8px;">
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Video info
+    st.markdown(f"""
+    <div class="video-container">
+        <h3 class="video-title">{title}</h3>
+        <p class="video-meta"><strong>📺 Channel:</strong> {channel}</p>
+        <p class="video-meta"><strong>⭐ Relevance:</strong> {score:.3f}</p>
+        <p class="video-meta">
+            <strong>🔗 Watch:</strong> 
+            <a href="https://youtube.com/watch?v={video_id}" target="_blank">
+                Open in YouTube
+            </a>
         </p>
     </div>
-    """
-    st.markdown(html_card, unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
-# Initialize session state
-if "model_loaded" not in st.session_state:
-    st.session_state.model_loaded = False
-
-# Load data and model
-if ML_AVAILABLE and not st.session_state.model_loaded:
-    with st.spinner("🚀 Initializing QueryTube..."):
-        model, combined_embeddings, df, best_metric = load_data_and_model()
-        if model:
-            st.session_state.model_loaded = True
-
-# Header
+# === MAIN APP ===
 st.title("🎥 QueryTube")
-st.markdown("### 🔍 Semantic Search Engine for YouTube Videos")
+st.markdown("### Semantic search for YouTube videos")
+
+# System status
+if not st.session_state.system_ready:
+    if st.button("🚀 Initialize System"):
+        if initialize_system():
+            st.rerun()
+    else:
+        st.info("👆 Click 'Initialize System' to start")
+        
+        # Debug info
+        with st.expander("🔍 Debug Info"):
+            st.write("**Files:**")
+            for file in ["video_index_with_embeddings.parquet"]:
+                st.write(f"- {file}: {'✅' if os.path.exists(file) else '❌'}")
+            
+            st.write("**ML Libraries:**")
+            st.write(f"- sentence-transformers: {'✅' if ML_AVAILABLE else '❌'}")
+        
+        # Create test data option
+        if st.button("🧪 Create Test Data"):
+            create_test_data()
+            st.success("Test data created! Click 'Initialize System'")
+        st.stop()
+
+# Search interface (only if ready)
+st.markdown("---")
+query = st.text_input(
+    "🔍 Search videos:",
+    placeholder="e.g., 'Top 10 movies', 'AI explained', 'Tech tutorials'",
+    help="Enter your search query"
+)
+
+if st.button("🔍 Search", type="primary") and query.strip():
+    with st.spinner("Searching..."):
+        results = search_videos(query.strip())
+        
+        if not results.empty:
+            st.success(f"✅ Found {len(results)} videos!")
+            
+            # Display results
+            for idx, (_, video) in enumerate(results.iterrows()):
+                st.markdown(f"---")
+                display_video_result(video)
+                
+                # Test video availability
+                if idx == 0:  # Test first video
+                    st.info(f"🧪 Testing video ID: {video['video_id']}")
+            
+            # Download results
+            csv = results[["video_id", "title", "score", "channel"]].to_csv(index=False)
+            st.download_button(
+                "💾 Download Results",
+                csv,
+                "search_results.csv",
+                "text/csv"
+            )
+        else:
+            st.warning("😔 No videos found. Try different keywords!")
+            st.info("💡 Tips: Use specific topics, try synonyms")
 
 # Sidebar
 with st.sidebar:
-    st.header("⚙️ Control Panel")
-    
-    if st.session_state.model_loaded and model:
-        st.success("✅ System Ready")
-        st.info(f"**Model:** {model[0].__class__.__name__}")
-        st.info(f"**Metric:** {best_metric}")
-        st.info(f"**Videos Indexed:** {len(df):,}")
-        st.info(f"**Memory Usage:** {df.memory_usage(deep=True).sum() / 1024**2:.1f} MB")
+    st.header("⚙️ System Info")
+    if st.session_state.system_ready:
+        st.success("🟢 Ready")
+        st.info(f"**Videos:** {len(st.session_state.df):,}")
+        st.info(f"**Model:** all-MiniLM-L6-v2")
     else:
-        st.error("❌ System Not Ready")
-        st.info("Check file uploads and dependencies")
+        st.error("🔴 Not Ready")
     
-    st.markdown("---")
-    if st.button("🔄 Reload Model"):
-        st.cache_resource.clear()
-        st.session_state.model_loaded = False
+    if st.button("🔄 Reset"):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
         st.rerun()
-    
-    st.markdown("---")
-    st.info("**Required Files:**")
-    st.code("video_index_with_embeddings.parquet")
 
-# Main search interface
-st.markdown("---")
-col1, col2 = st.columns([4, 1])
-
-with col1:
-    query = st.text_input(
-        "🔍 Enter your search query:",
-        placeholder="e.g., 'Top 10 AI breakthroughs', 'Quantum computing basics'",
-        help="Type your query and press Enter or click Search"
-    )
-
-with col2:
-    search_trigger = st.button("🚀 Search", type="primary", use_container_width=True)
-
-# Process search
-if (search_trigger or query) and st.session_state.model_loaded and query.strip():
-    with st.spinner("🔍 Searching for relevant videos..."):
-        time.sleep(1)  # Simulate processing
-        
-        results = query_to_top5_videos(query.strip(), metric=best_metric)
-        
-        if not results.empty:
-            st.success(f"✅ Found {len(results)} relevant videos!")
-            
-            # Display results in responsive columns
-            num_cols = min(3, len(results))
-            cols = st.columns(num_cols)
-            
-            for i, (_, video) in enumerate(results.iterrows()):
-                with cols[i % num_cols]:
-                    display_video_card(video)
-            
-            # Save results
-            try:
-                results.to_csv("last_search_results.csv", index=False)
-                st.success("💾 Results saved to last_search_results.csv")
-            except Exception as e:
-                st.warning(f"Could not save results: {e}")
-                
-            # Display metrics
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Top Score", f"{results['score'].max():.3f}")
-            with col2:
-                st.metric("Average Score", f"{results['score'].mean():.3f}")
-            with col3:
-                st.metric("Total Results", len(results))
-                
-        else:
-            st.warning("😔 No videos found matching your query. Try different keywords!")
-            st.info("Tips: Use specific topics, avoid very common terms")
-
-# Instructions and debug
-with st.expander("ℹ️ About & Troubleshooting"):
+# Help
+with st.expander("📖 Troubleshooting Videos Not Loading"):
     st.markdown("""
-    ## 🎯 About QueryTube
+    ## Common Issues & Fixes:
     
-    **QueryTube** uses semantic search to find relevant YouTube videos based on:
-    - **Sentence Transformers** for query understanding
-    - **Cosine similarity** for ranking
-    - **Pre-computed embeddings** from video titles/transcripts
+    ### 1. **Invalid Video IDs**
+    - Check if `video_id` column contains 11-character YouTube IDs
+    - Format: `[a-zA-Z0-9_-]{11}`
     
-    ## 📋 Requirements
-    - `video_index_with_embeddings.parquet` (must have `emb_` columns)
-    - Minimum 2GB RAM for model loading
+    ### 2. **YouTube Embed Restrictions**
+    - Some videos have embedding disabled
+    - Solution: Use thumbnail + external link
     
-    ## 🛠️ Troubleshooting
-    1. **Model fails to load**: Use `all-MiniLM-L6-v2` (smaller model)
-    2. **Memory errors**: Clear cache and restart
-    3. **No embeddings**: Check parquet file structure
-    4. **Import errors**: Install `pip install sentence-transformers torch`
+    ### 3. **Network/CORS Issues**
+    - Streamlit Cloud may block iframes
+    - Solution: Fallback to thumbnails + links
     
-    ## 🚀 For Streamlit Cloud
-    - Upload parquet file to repo
-    - Use `packages.txt` for system deps
-    - Set model to `all-MiniLM-L6-v2`
-    """)
-
-# Debug section
-if st.checkbox("🐛 Show Debug Info"):
-    st.subheader("Debug Information")
-    if df is not None:
-        st.json({
-            "Total Videos": len(df),
-            "Embedding Shape": str(combined_embeddings.shape) if combined_embeddings is not None else "None",
-            "Columns": df.columns.tolist(),
-            "Sample Data": df.head(2).to_dict()
-        })
-    else:
-        st.error("No data loaded for debugging")
+    ### 4. **Test Your Data**
+    ```python
+    # Check video IDs
+    df['video_id'].str.len().value_counts()
+    df['video_id'].str.match(r'^[a-zA-Z0-9_-]{{11}}$').sum()
